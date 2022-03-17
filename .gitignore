@@ -1,1 +1,6 @@
 .env
+config.ini
+.gitignore
+__pycache__
+tgsession.session
+3cqsbot.out.log

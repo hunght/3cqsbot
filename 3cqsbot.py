@@ -36,6 +36,17 @@ args = parser.parse_args()
 ######################################################
 #                        Init                        #
 ######################################################
+
+ 
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s [%(levelname)s] %(message)s",
+    handlers=[
+        logging.FileHandler(config["general"]["file_handler"]),
+        logging.StreamHandler()
+    ]
+)
+
 p3cw = Py3CW(
     key=config["commas"]["key"],
     secret=config["commas"]["secret"],
