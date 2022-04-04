@@ -4,3 +4,8 @@ config.ini
 __pycache__
 tgsession.session
 3cqsbot.out.log
+*.pyc
+*.session
+*.session-journal
+config.ini
+ 

@@ -1,5 +1,6 @@
 import random
 import json
+from sys import prefix
 
 from signals import Signals
 
@@ -30,13 +31,13 @@ class MultiBot:
 
     def adjustmad(self, pairs, mad):
         # Lower max active deals, when pairs are under mad
-        if len(pairs) < mad:
+        if len(pairs) * self.config["dcabot"].getint("sdsp") < mad:
             self.logging.debug(
                 "Pairs are under 'mad' - Lower max active deals to actual pairs"
             )
             mad = len(pairs)
         # Raise max active deals to minimum pairs or mad if possible
-        elif len(pairs) >= mad:
+        elif len(pairs) * self.config["dcabot"].getint("sdsp") >= mad:
             self.logging.debug("Pairs are over 'mad' - nothing to do")
             mad = self.config["dcabot"].getint("mad")
 
@@ -60,7 +61,7 @@ class MultiBot:
             "strategy_list": self.strategy(),
             "trailing_enabled": self.config["trading"].getboolean("trailing"),
             "trailing_deviation": self.config["trading"].getfloat("trailing_deviation"),
-            "allowed_deals_on_same_pair": 1,
+            "allowed_deals_on_same_pair": self.config["dcabot"].getint("sdsp"),
             "min_volume_btc_24h": self.config["dcabot"].getfloat("btc_min_vol"),
         }
 
@@ -83,6 +84,8 @@ class MultiBot:
                 self.logging.debug("Error enabling bot: " + bot["name"])
             else:
                 self.logging.info("Enabling bot: " + bot["name"])
+        else:
+            self.logging.info(bot["name"] + " enabled")
 
     def disable(self):
         # Disables an existing bot
@@ -90,7 +93,6 @@ class MultiBot:
             if (self.prefix + "_" + self.subprefix + "_" + self.suffix) in bot["name"]:
 
                 # Disables an existing bot
-                self.logging.info("Disabling bot")
                 error, data = self.p3cw.request(
                     entity="bots",
                     action="disable",
@@ -101,49 +103,66 @@ class MultiBot:
                 )
 
                 if error:
-                    self.logging.error(error["msg"])
+                    self.logging.error("Error disabling bot: " + error["msg"])
                 else:
                     self.logging.info("Disabling bot: " + bot["name"])
 
     def new_deal(self, bot, triggerpair):
-        # Enables an existing bot
+        # Triggers a new deal
         if triggerpair:
             pair = triggerpair
         else:
-            pair = random.choice(bot["pairs"])
-
-        self.logging.info("Trigger new deal with pair " + pair)
-        error, data = self.p3cw.request(
-            entity="bots",
-            action="start_new_deal",
-            action_id=str(bot["id"]),
-            additional_headers={"Forced-Mode": self.config["trading"]["trade_mode"]},
-            payload={"pair": pair},
-        )
-
-        if error:
-            if bot["active_deals_count"] == bot["max_active_deals"]:
-                self.logging.info("Max deals count reached, not adding a new one.")
+            if self.config["filter"].getboolean("random_pair"):
+                pair = random.choice(bot["pairs"])
             else:
-                self.logging.error(error["msg"])
+                pair = ""
+
+        if pair:
+            self.logging.info("Trigger new deal with pair " + pair)
+            error, data = self.p3cw.request(
+                entity="bots",
+                action="start_new_deal",
+                action_id=str(bot["id"]),
+                additional_headers={
+                    "Forced-Mode": self.config["trading"]["trade_mode"]
+                },
+                payload={"pair": pair},
+            )
+
+            if error:
+                if bot["active_deals_count"] == bot["max_active_deals"]:
+                    self.logging.info("Max deals count reached, not adding a new one.")
+                else:
+                    self.logging.error(error["msg"])
+        else:
+            self.logging.info("Pair was not part of the START signal, ignoring it.")
 
     def create(self):
         # Creates a multi bot with start signal
         new_bot = True
         pairs = []
+        botnames = []
         mad = self.config["dcabot"].getint("mad")
 
         # Check for existing or new bot
         for bot in self.bot_data:
+
+            botnames.append(bot["name"])
+
             if (self.prefix + "_" + self.subprefix + "_" + self.suffix) in bot["name"]:
                 botid = str(bot["id"])
                 new_bot = False
                 break
 
+        self.logging.debug("Existing bot names: " + str(botnames))
+
         # Create pair list
         # Filter topcoins (if set)
         pairlist = self.signal.topcoin(
-            self.tg_data, self.config["filter"].getint("topcoin_limit")
+            self.tg_data,
+            self.config["filter"].getint("topcoin_limit"),
+            self.config["filter"].getint("topcoin_volume"),
+            self.config["filter"]["topcoin_exchange"],
         )
         for pair in pairlist:
             pair = self.config["trading"]["market"] + "_" + pair
@@ -172,7 +191,7 @@ class MultiBot:
 
         if new_bot:
 
-            self.logging.info("Create multi bot with pairs " + str(pairs))
+            self.logging.info("Creating multi bot with pairs " + str(pairs))
             error, data = self.p3cw.request(
                 entity="bots",
                 action="create_bot",
@@ -185,7 +204,12 @@ class MultiBot:
             if error:
                 self.logging.error(error["msg"])
             else:
-                self.enable(data)
+                if not self.config["filter"].getboolean("ext_botswitch"):
+                    self.enable(data)
+                else:
+                    self.logging.info(
+                        "ext_botswitch set to true, bot has to be enabled by external TV signal"
+                    )
                 self.new_deal(data, triggerpair="")
         else:
 
@@ -202,42 +226,55 @@ class MultiBot:
             if error:
                 self.logging.error(error["msg"])
             else:
-                self.logging.info("Update pairs from symrank")
+                self.logging.info(bot["name"] + " updated with filtered pairs")
                 self.logging.debug("Pairs: " + str(pairs))
-                self.enable(data)
+                if not self.config["filter"].getboolean("ext_botswitch"):
+                    self.enable(data)
+                else:
+                    self.logging.info(
+                        "ext_botswitch set to true, bot enabling/disabling has to be managed by external TV signal"
+                    )
 
     def trigger(self, triggeronly=False):
         # Updates multi bot with new pairs
         triggerpair = ""
-        deal_strategy = self.strategy()
         mad = self.config["dcabot"].getint("mad")
-
-        self.logging.info("Got new 3cqs signal")
 
         for bot in self.bot_data:
             if (self.prefix + "_" + self.subprefix + "_" + self.suffix) in bot["name"]:
 
                 if not triggeronly:
-
                     pair = self.tg_data["pair"]
+
+                    self.logging.info(
+                        "Got new 3cqs "
+                        + self.tg_data["action"]
+                        + " signal for pair "
+                        + pair
+                    )
 
                     if self.tg_data["action"] == "START":
                         triggerpair = pair
 
                         if pair in bot["pairs"]:
                             self.logging.info(
-                                "Pair " + pair + " is already included in the list"
+                                "Pair " + pair + " is already included in the pair list"
                             )
                         else:
                             pair = self.signal.topcoin(
-                                pair, self.config["filter"].getint("topcoin_limit")
+                                pair,
+                                self.config["filter"].getint("topcoin_limit"),
+                                self.config["filter"].getint("topcoin_volume"),
+                                self.config["filter"]["topcoin_exchange"],
                             )
                             if pair:
-                                self.logging.info("Add pair " + pair)
+                                self.logging.info("Adding pair " + pair)
                                 bot["pairs"].append(pair)
                             else:
                                 self.logging.info(
-                                    "Pair " + pair + " is not in the top coin list!"
+                                    "Pair "
+                                    + pair
+                                    + " is not in filtered Coingecko's top coin list!"
                                 )
 
                     else:
@@ -248,7 +285,7 @@ class MultiBot:
                             self.logging.info(
                                 "Pair "
                                 + pair
-                                + " is not included in the list, not removed"
+                                + " was not included in the pair list, not removed"
                             )
 
                     # Adapt mad if pairs are under value

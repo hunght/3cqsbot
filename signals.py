@@ -51,6 +51,14 @@ class Signals:
 
     @staticmethod
     @timed_lru_cache(seconds=10800)
+    def cgexchanges(exchange, id):
+        cg = CoinGeckoAPI()
+        exchange = cg.get_exchanges_tickers_by_id(id=exchange, coin_ids=id)
+
+        return exchange
+
+    @staticmethod
+    @timed_lru_cache(seconds=10800)
     def cgvalues(rank):
         cg = CoinGeckoAPI()
         market = []
@@ -67,13 +75,48 @@ class Signals:
 
         return market
 
-    def topcoin(self, pairs, rank):
+    def topvolume(self, id, volume, exchange):
+        # Check if topcoin has enough volume
+        volume_target = True
+
+        if volume > 0:
+
+            exchange = self.cgexchanges(exchange, id)
+
+            self.logging.debug(self.cgvalues.cache_info())
+
+            for target in exchange["tickers"]:
+                if (
+                    target["target"] == "USDT"
+                    and target["converted_volume"]["btc"] >= volume
+                ):
+                    volume_target = True
+                    break
+                else:
+                    volume_target = False
+
+        return volume_target
+
+    def topcoin(self, pairs, rank, volume, exchange):
 
         market = self.cgvalues(rank)
 
         self.logging.debug(self.cgvalues.cache_info())
+        self.logging.info(
+            "Applying CG's Top coin filter settings: marketcap <= "
+            + str(rank)
+            + " with daily BTC volume >= "
+            + str(volume)
+            + " on "
+            + str(exchange)
+        )
 
         if isinstance(pairs, list):
+            self.logging.info(
+                str(len(pairs))
+                + " Symrank pair(s) BEFORE Top coin filter: "
+                + str(pairs)
+            )
             pairlist = []
             for pair in pairs:
                 for symbol in market:
@@ -82,18 +125,37 @@ class Signals:
                         coin.lower() in symbol["symbol"]
                         and int(symbol["market_cap_rank"]) <= rank
                     ):
-                        pairlist.append(pair)
-                        break
+                        # Check if topcoin has enough volume
+                        if self.topvolume(symbol["id"], volume, exchange):
+                            pairlist.append(pair)
+                            break
         else:
+            self.logging.info("Symrank pair BEFORE Top coin filter: " + str(pairs))
             pairlist = ""
             coin = re.search("(\w+)_(\w+)", pairs).group(2)
 
             for symbol in market:
-                if coin.lower() in symbol["symbol"]:
-                    pairlist = pairs
-                    break
+                if (
+                    coin.lower() in symbol["symbol"]
+                    and int(symbol["market_cap_rank"]) <= rank
+                ):
+                    # Check if topcoin has enough volume
+                    if self.topvolume(symbol["id"], volume, exchange):
+                        pairlist = pairs
+                        break
 
-        self.logging.debug("Pairs after toplist: " + str(pairlist))
+        if not pairlist:
+            self.logging.info(str(pairs) + " not ranging under CG's Top coins")
+        else:
+            if isinstance(pairlist, str):
+                self.logging.info(str(pairlist) + " matching with CG's Top coins")
+            else:
+                self.logging.info(
+                    str(len(pairlist))
+                    + " Symrank pair(s) AFTER Top coin filter: "
+                    + str(pairlist)
+                )
+
         return pairlist
 
     # Credits goes to @IamtheOnewhoKnocks from
@@ -149,7 +211,9 @@ class Signals:
                 btcusdt.percentchange_15mins[-1] < -1
                 or btcusdt.EMA50[-1] > btcusdt.EMA9[-1]
             ):
-                self.logging.info("Bot sleep")
+                self.logging.info(
+                    "BTC pulse signaling Downtrend. Waiting 5m more to confirm Downtrend."
+                )
 
                 # after 5mins getting the latest BTC data to see if it has had a sharp rise in previous 5 mins
                 await asyncio.sleep(300)
@@ -161,14 +225,17 @@ class Signals:
                     btcusdt.EMA9[-1] > btcusdt.EMA50[-1]
                     and btcusdt.EMA50[-2] > btcusdt.EMA9[-2]
                 ):
-                    self.logging.info("Bot awake")
+                    self.logging.info("No Downtrend proved. BTC still in Uptrend")
                     asyncState.btcbool = False
                 else:
-                    self.logging.info("Bot sleep")
+                    self.logging.info(
+                        "Downtrend proved. BTC pulse sending 3cqsbot to sleep"
+                    )
                     asyncState.btcbool = True
 
             else:
-                self.logging.info("Bot awake")
+                self.logging.info("BTC pulse signaling Uptrend")
                 asyncState.btcbool = False
 
+            self.logging.info("Next BTC pulse check in 5m")
             await asyncio.sleep(300)
